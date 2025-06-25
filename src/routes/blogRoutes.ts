@@ -8,7 +8,8 @@ import {
   userSignup,
 } from "../controller/blogController";
 import blogMiddleware from "../middleware/blogMiddleware";
-
+import { authLimiter } from "../config/rateLimiter";
+import { generalLimiter } from "../config/rateLimiter";
 let blogRouter = Router();
 import multer from "multer";
 import path from "path";
@@ -43,16 +44,17 @@ const upload = multer({
   },
 });
 
-blogRouter.post("/signup", userSignup);
-blogRouter.post("/login", userLogin);
+blogRouter.post("/signup", authLimiter, userSignup);
+blogRouter.post("/login", authLimiter, userLogin);
 blogRouter.post(
   "/add-blog",
   blogMiddleware,
+  generalLimiter,
   upload.single("image"),
   createBlog
 );
-blogRouter.get("/blog", fetchBlog);
-blogRouter.delete("/delete/:blogId", deleteBlog);
-blogRouter.patch("/update/:blogId", updateBlog);
+blogRouter.get("/blog", generalLimiter, fetchBlog);
+blogRouter.delete("/delete/:blogId", generalLimiter, deleteBlog);
+blogRouter.patch("/update/:blogId", generalLimiter, updateBlog);
 
 export { blogRouter };
