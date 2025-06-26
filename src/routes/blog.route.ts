@@ -6,7 +6,7 @@ import {
   updateBlog,
   userLogin,
   userSignup,
-} from "../controller/blogController";
+} from "../controller/blog.controller";
 import blogMiddleware from "../middleware/blogMiddleware";
 import { authLimiter } from "../config/rateLimiter";
 import { generalLimiter } from "../config/rateLimiter";
@@ -55,6 +55,11 @@ blogRouter.post(
 );
 blogRouter.get("/blog", generalLimiter, fetchBlog);
 blogRouter.delete("/delete/:blogId", generalLimiter, deleteBlog);
-blogRouter.patch("/update/:blogId", generalLimiter, updateBlog);
+blogRouter.patch(
+  "/update/:blogId",
+  generalLimiter,
+  upload.single("image"),
+  updateBlog
+);
 
 export { blogRouter };

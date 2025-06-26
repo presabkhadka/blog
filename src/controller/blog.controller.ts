@@ -1,12 +1,13 @@
 import { type Request, type Response } from "express";
 import bcrypt from "bcrypt";
-import { Blog, User } from "../db/db";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import fs from "fs";
 import { Multer } from "multer";
 dotenv.config();
 let jwtPass = process.env.JWT_SECRET;
+import pool from "../db/db";
+import { error } from "console";
 
 export async function userSignup(req: Request, res: Response) {
   try {
@@ -17,33 +18,39 @@ export async function userSignup(req: Request, res: Response) {
       });
       return;
     }
-    let hashedPass = await bcrypt.hash(password, 10);
+    let conn = await pool.getConnection();
+    try {
+      let [userRows] = await conn.execute(
+        "SELECT * FROM users WHERE email = ?",
+        [email]
+      );
 
-    let existingUser = await User.findOne({
-      email,
-    });
+      if ((userRows as any[]).length > 0) {
+        res.status(401).json({
+          msg: "User already exists with such email",
+        });
+        return;
+      }
 
-    if (existingUser) {
-      res.status(409).json({
-        msg: "User already exists with such email",
+      let hashedPassword = await bcrypt.hash(password, 10);
+
+      await conn.execute(
+        "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
+        [username, email, hashedPassword]
+      );
+
+      res.status(200).json({
+        msg: "User registered successfully",
       });
-      return;
+    } finally {
+      conn.release();
     }
-
-    await User.create({
-      username,
-      email,
-      password: hashedPass,
-    });
-    res.status(200).json({
-      msg: "User registered successfully",
-    });
   } catch (error) {
     res.status(500).json({
       msg:
         error instanceof Error
           ? error.message
-          : "Something went wrong with the server",
+          : "Something went wrong with the serevr",
     });
   }
 }
@@ -55,43 +62,47 @@ export async function userLogin(req: Request, res: Response) {
       res.status(400).json({
         msg: "Input fields cannot be left empty",
       });
-      return;
     }
+    let conn = await pool.getConnection();
 
-    let existingUser = await User.findOne({
-      email,
-    });
+    try {
+      let [userRows] = await conn.execute(
+        "SELECT * FROM users WHERE email = ?",
+        [email]
+      );
 
-    if (!existingUser) {
-      res.status(404).json({
-        msg: "No such user found in our db",
+      if ((userRows as any[]).length === 0) {
+        res.status(404).json({
+          msg: "No such user found in our db",
+        });
+        return;
+      }
+
+      let user = (userRows as any[])[0];
+
+      let passwordMatch = await bcrypt.compare(password, user.password);
+
+      if (!passwordMatch) {
+        res.status(401).json({
+          msg: "Invalid Credentials, Please try again later",
+        });
+        return;
+      }
+
+      let token = await jwt.sign({ email }, jwtPass!);
+
+      res.status(200).json({
+        token,
       });
-      return;
+    } finally {
+      conn.release();
     }
-
-    let passwordMatch = await bcrypt.compare(
-      password,
-      existingUser.password as string
-    );
-
-    if (!passwordMatch) {
-      res.status(400).json({
-        msg: "Incorrect credentials, Please try again",
-      });
-      return;
-    }
-
-    let token = await jwt.sign({ email }, jwtPass!);
-
-    res.status(200).json({
-      msg: token,
-    });
   } catch (error) {
     res.status(500).json({
       msg:
         error instanceof Error
           ? error.message
-          : "Something went wrong with the server",
+          : "Something went wrong with the server at the moment",
     });
   }
 }
@@ -104,15 +115,6 @@ export async function createBlog(req: Request, res: Response) {
           (req as Request & { file?: Express.Multer.File }).file!.filename
         }`
       : null;
-    //   @ts-ignore
-    let user = req.user;
-    console.log("🚀 ~ createBlog ~ user:", user);
-
-    let userExist = await User.findOne({
-      email: user,
-    });
-
-    let authorId = userExist?._id;
 
     if (!title || !content || !image) {
       res.status(400).json({
@@ -121,26 +123,48 @@ export async function createBlog(req: Request, res: Response) {
       return;
     }
 
-    let existingBlog = await Blog.findOne({
-      title,
-    });
+    //   @ts-ignore
+    let user = req.user;
 
-    if (existingBlog) {
-      res.status(409).json({
-        msg: "Blog already exists with that title, Try editing it or deleting it",
+    const conn = await pool.getConnection();
+
+    try {
+      const [userRows] = await conn.execute(
+        "SELECT id FROM users WHERE email = ?",
+        [user]
+      );
+
+      if ((userRows as any[]).length === 0) {
+        res.status(404).json({
+          msg: "User not found",
+        });
+        return;
+      }
+
+      let authorId = (userRows as any[])[0].id;
+
+      let [existingBlogRows] = await conn.execute(
+        "SELECT id FROM blogs WHERE title = ?",
+        [title]
+      );
+
+      if ((existingBlogRows as any[]).length > 0) {
+        res.status(409).json({
+          msg: "Blog already exists with that title, Try editing it or deleting it",
+        });
+      }
+
+      await conn.execute(
+        "INSERT INTO blogs (title, content, image, author) VALUES (?, ?, ?, ?)",
+        [title, content, image, authorId]
+      );
+
+      res.status(200).json({
+        msg: "Blog created successfully",
       });
-      return;
+    } finally {
+      conn.release();
     }
-
-    await Blog.create({
-      title,
-      content,
-      author: authorId,
-      image,
-    });
-    res.status(200).json({
-      msg: "Blog created successfully",
-    });
   } catch (error) {
     res.status(500).json({
       msg:
@@ -153,16 +177,23 @@ export async function createBlog(req: Request, res: Response) {
 
 export async function fetchBlog(req: Request, res: Response) {
   try {
-    let blogs = await Blog.find({});
-    if (blogs.length === 0) {
-      res.status(404).json({
-        msg: "No blogs present in our db",
+    let conn = await pool.getConnection();
+    try {
+      let [blogRows] = await conn.execute("SELECT * FROM blogs");
+
+      if ((blogRows as any[]).length === 0) {
+        res.status(404).json({
+          msg: "No blogs found in our db",
+        });
+        return;
+      }
+
+      res.status(200).json({
+        blogRows,
       });
-      return;
+    } finally {
+      conn.release();
     }
-    res.status(200).json({
-      blogs,
-    });
   } catch (error) {
     res.status(500).json({
       msg:
@@ -178,34 +209,38 @@ export async function deleteBlog(req: Request, res: Response) {
     let { blogId } = req.params;
     if (!blogId) {
       res.status(400).json({
-        msg: "No blog id present in the params",
+        msg: "No blog id found in params",
       });
       return;
     }
 
-    let blogExists = await Blog.findOne({
-      _id: blogId,
-    });
+    let conn = await pool.getConnection();
+    try {
+      let [blogRoom] = await conn.execute("SELECT * FROM blogs WHERE id = ?", [
+        blogId,
+      ]);
 
-    if (!blogExists) {
-      res.status(404).json({
-        msg: "No such blog found in our db",
+      if ((blogRoom as any[]).length === 0) {
+        res.status(404).json({
+          msg: "No blogs found with such id in our db",
+        });
+        return;
+      }
+
+      await conn.execute("DELETE FROM blogs WHERE id = ?", [blogId]);
+
+      res.status(200).json({
+        msg: "Blog deleted successfully",
       });
-      return;
+    } finally {
+      conn.release();
     }
-
-    await Blog.deleteOne({
-      _id: blogId,
-    });
-    res.status(200).json({
-      msg: "Blog deleted successfully",
-    });
   } catch (error) {
     res.status(500).json({
       msg:
         error instanceof Error
           ? error.message
-          : "Something went wrong with the server at the moment",
+          : "Something went wrong with the server",
     });
   }
 }
@@ -219,29 +254,16 @@ export async function updateBlog(req: Request, res: Response) {
       });
       return;
     }
-    let blogExists = await Blog.findOne({
-      _id: blogId,
-    });
 
-    if (!blogExists) {
-      res.status(404).json({
-        msg: "No blog exists with such id in our db",
-      });
-      return;
-    }
-
-    let { title = undefined, content = undefined } = req.body as Record<
-      string,
-      any
-    >;
-
+    let title = req.body?.title;
+    let content = req.body?.content;
     let image = req.file ? `/uploads/${req.file.filename}` : null;
 
-    const fieldsToUpdate: Record<string, any> = {};
+    let fieldsToUpdate: Record<string, any> = {};
 
     if (title) fieldsToUpdate.title = title;
     if (content) fieldsToUpdate.content = content;
-    if (image) fieldsToUpdate.image = image
+    if (image) fieldsToUpdate.image = image;
 
     if (Object.keys(fieldsToUpdate).length === 0) {
       res.status(400).json({
@@ -250,12 +272,33 @@ export async function updateBlog(req: Request, res: Response) {
       return;
     }
 
-    let result = await Blog.updateOne(
-      {
-        _id: blogId,
-      },
-      { $set: fieldsToUpdate }
-    );
+    let conn = await pool.getConnection();
+
+    try {
+      let [blogRows] = await conn.execute("SELECT * FROM blogs WHERE id = ?", [
+        blogId,
+      ]);
+
+      if ((blogRows as any[]).length === 0) {
+        res.status(404).json({
+          msg: "No such blogs with that id found in our db",
+        });
+        return;
+      }
+    } finally {
+      conn.release();
+    }
+
+    const setClause = Object.keys(fieldsToUpdate)
+      .map((field) => `${field} = ?`)
+      .join(", ");
+
+    const values = Object.values(fieldsToUpdate);
+
+    await conn.execute(`UPDATE blogs SET ${setClause} WHERE id = ?`, [
+      ...values,
+      blogId,
+    ]);
 
     res.status(200).json({
       msg: "Blog updated successfully",
@@ -269,4 +312,3 @@ export async function updateBlog(req: Request, res: Response) {
     });
   }
 }
- 
